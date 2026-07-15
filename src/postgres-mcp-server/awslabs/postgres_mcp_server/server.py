@@ -188,6 +188,8 @@ async def run_query(
                     port=startup_connection_params.get('port', 5432),
                     database=startup_connection_params['database'],
                     username=startup_connection_params.get('username'),
+                    connection_host=startup_connection_params.get('connection_host'),
+                    connection_port=startup_connection_params.get('connection_port'),
                 )
             except Exception as e:
                 logger.error(f'Auto-connect failed: {e}')
@@ -325,6 +327,8 @@ def connect_to_database(
     port: Annotated[int, Field(description='Postgres port')],
     database: Annotated[str, Field(description='database name')],
     username: Annotated[Optional[str], Field(description='database username for IAM authentication (required for PG_WIRE_IAM_PROTOCOL)')] = None,
+    connection_host: Annotated[Optional[str], Field(description='host to open the socket to (defaults to db_endpoint; set when tunneling)')] = None,
+    connection_port: Annotated[Optional[int], Field(description='port to open the socket to (defaults to port)')] = None,
 ) -> str:
     """Connect to a specific database save the connection internally.
 
@@ -362,6 +366,8 @@ def connect_to_database(
             port=port,
             database=database,
             username=username,
+            connection_host=connection_host,
+            connection_port=connection_port,
         )
 
         return str(llm_response)
@@ -595,6 +601,8 @@ def internal_connect_to_database(
     port: Annotated[int, Field(description='Postgres port')],
     database: Annotated[str, Field(description='database name')] = 'postgres',
     username: Annotated[Optional[str], Field(description='database username for IAM auth')] = None,
+    connection_host: Annotated[Optional[str], Field(description='host to open the socket to (defaults to db_endpoint)')] = None,
+    connection_port: Annotated[Optional[int], Field(description='port to open the socket to (defaults to port)')] = None,
 ) -> Tuple:
     """Connect to a specific database save the connection internally.
 
@@ -603,9 +611,13 @@ def internal_connect_to_database(
         database_type: database type (APG or RPG)
         connection_method: connection method (RDS_API, PG_WIRE_PROTOCOL, or PG_WIRE_IAM_PROTOCOL)
         cluster_identifier: cluster identifier
-        db_endpoint: database endpoint
-        port: database port
+        db_endpoint: database endpoint (used to sign the IAM token and as the map identity)
+        port: database port (used to sign the IAM token; the real DB port)
         database: database name
+        connection_host: host to actually open the socket to; defaults to db_endpoint. Set to
+            e.g. 127.0.0.1 when reaching the DB through an SSH tunnel while the IAM token stays
+            signed for db_endpoint.
+        connection_port: port to actually open the socket to; defaults to port.
     """
     global db_connection_map
     global readonly_query
@@ -702,6 +714,8 @@ def internal_connect_to_database(
             db_user=effective_user,
             region=region,
             is_iam_auth=True,
+            connect_host=connection_host,
+            connect_port=connection_port,
         )
 
     elif connection_method == ConnectionMethod.RDS_API:
@@ -723,6 +737,8 @@ def internal_connect_to_database(
             db_user='',
             region=region,
             is_iam_auth=False,
+            connect_host=connection_host,
+            connect_port=connection_port,
         )
 
     if db_connection:
@@ -896,6 +912,18 @@ def main():
     parser.add_argument('--database', help='Database name')
     parser.add_argument('--port', type=int, default=5432, help='Database port (default: 5432)')
     parser.add_argument('--username', help='Database username (required for IAM auth if different from master user)')
+    parser.add_argument(
+        '--connection_host',
+        help='Host to open the TCP socket to (default: --db_endpoint). Set to e.g. 127.0.0.1 '
+        'to reach the DB through an SSH tunnel/proxy; the IAM token is still signed for '
+        '--db_endpoint, so no /etc/hosts override is needed.',
+    )
+    parser.add_argument(
+        '--connection_port',
+        type=int,
+        help='Port to open the TCP socket to (default: --port). Set to the local tunnel port '
+        'when using --connection_host.',
+    )
     args = parser.parse_args()
 
     logger.info(
@@ -908,6 +936,8 @@ def main():
         f'allow_write_query:{args.allow_write_query}\n'
         f'database:{args.database}\n'
         f'port:{args.port}\n'
+        f'connection_host:{args.connection_host}\n'
+        f'connection_port:{args.connection_port}\n'
     )
 
     readonly_query = not args.allow_write_query
@@ -927,6 +957,8 @@ def main():
                 'port': args.port,
                 'database': args.database,
                 'username': args.username,
+                'connection_host': args.connection_host,
+                'connection_port': args.connection_port,
             }
 
             # Validate database connection at startup
@@ -939,6 +971,8 @@ def main():
                 port=args.port,
                 database=args.database,
                 username=args.username,
+                connection_host=args.connection_host,
+                connection_port=args.connection_port,
             )
 
             # Test database connection
