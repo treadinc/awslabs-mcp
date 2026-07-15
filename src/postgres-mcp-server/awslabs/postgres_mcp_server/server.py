@@ -118,14 +118,40 @@ mcp = FastMCP(
 )
 
 
+def _fill_startup_conn_defaults(connection_method, cluster_identifier, db_endpoint, database):
+    """Default the connection-identity args from the server's startup params when omitted.
+
+    Each server process is pinned to one cluster at startup (startup_connection_params), so a
+    caller can invoke run_query/get_table_schema with just `sql` (or `table_name`) and let these
+    default in — no need to re-supply connection_method/cluster_identifier/db_endpoint/database
+    on every call. Explicitly-passed values win, so multi-target usage still works.
+    """
+    global startup_connection_params
+    scp = startup_connection_params or {}
+    connection_method = connection_method or scp.get('connection_method')
+    cluster_identifier = cluster_identifier or scp.get('cluster_identifier')
+    db_endpoint = db_endpoint or scp.get('db_endpoint')
+    database = database or scp.get('database')
+    return connection_method, cluster_identifier, db_endpoint, database
+
+
 @mcp.tool(name='run_query', description='Run a SQL query against PostgreSQL')
 async def run_query(
     sql: Annotated[str, Field(description='The SQL query to run')],
     ctx: Context,
-    connection_method: Annotated[ConnectionMethod, Field(description='connection method')],
-    cluster_identifier: Annotated[str, Field(description='Cluster identifier')],
-    db_endpoint: Annotated[str, Field(description='database endpoint')],
-    database: Annotated[str, Field(description='database name')],
+    connection_method: Annotated[
+        Optional[ConnectionMethod],
+        Field(description='connection method (defaults to the server startup value)'),
+    ] = None,
+    cluster_identifier: Annotated[
+        Optional[str], Field(description='Cluster identifier (defaults to the server startup value)')
+    ] = None,
+    db_endpoint: Annotated[
+        Optional[str], Field(description='database endpoint (defaults to the server startup value)')
+    ] = None,
+    database: Annotated[
+        Optional[str], Field(description='database name (defaults to the server startup value)')
+    ] = None,
     query_parameters: Annotated[
         Optional[List[Dict[str, Any]]], Field(description='Parameters for the SQL query')
     ] = None,
@@ -148,6 +174,10 @@ async def run_query(
     global unexpected_error_key
     global write_query_prohibited_key
     global db_connection_map
+
+    connection_method, cluster_identifier, db_endpoint, database = _fill_startup_conn_defaults(
+        connection_method, cluster_identifier, db_endpoint, database
+    )
 
     logger.info(
         f'Entered run_query with '
@@ -255,12 +285,21 @@ async def run_query(
 
 @mcp.tool(name='get_table_schema', description='Fetch table columns and comments from Postgres')
 async def get_table_schema(
-    connection_method: Annotated[ConnectionMethod, Field(description='connection method')],
-    cluster_identifier: Annotated[str, Field(description='Cluster identifier')],
-    db_endpoint: Annotated[str, Field(description='database endpoint')],
-    database: Annotated[str, Field(description='database name')],
     table_name: Annotated[str, Field(description='name of the table')],
     ctx: Context,
+    connection_method: Annotated[
+        Optional[ConnectionMethod],
+        Field(description='connection method (defaults to the server startup value)'),
+    ] = None,
+    cluster_identifier: Annotated[
+        Optional[str], Field(description='Cluster identifier (defaults to the server startup value)')
+    ] = None,
+    db_endpoint: Annotated[
+        Optional[str], Field(description='database endpoint (defaults to the server startup value)')
+    ] = None,
+    database: Annotated[
+        Optional[str], Field(description='database name (defaults to the server startup value)')
+    ] = None,
 ) -> list[dict]:
     """Get a table's schema information given the table name.
 
