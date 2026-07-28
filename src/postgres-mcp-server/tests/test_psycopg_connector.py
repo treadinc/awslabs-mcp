@@ -73,6 +73,33 @@ class TestPsycopgConnector:
         assert len(result['records']) > 0
 
     @pytest.mark.asyncio
+    async def test_execute_query_raises_actionable_error_on_connection_limit(self):
+        """Test that a role CONNECTION LIMIT rejection raises an actionable error."""
+        conn = PsycopgPoolConnection(
+            host='localhost',
+            port=5432,
+            database='test_db',
+            readonly=True,
+            secret_arn='test_secret_arn',  # pragma: allowlist secret
+            db_user='test_user',
+            is_iam_auth=False,
+            region='us-east-1',
+            is_test=True,
+        )
+
+        mock_pool = MagicMock()
+        mock_connection_cm = AsyncMock()
+        mock_connection_cm.__aenter__.side_effect = Exception(
+            'connection failed: connection to server at "127.0.0.1", port 15462 failed: '
+            'FATAL:  too many connections for role "test_user"'
+        )
+        mock_pool.connection.return_value = mock_connection_cm
+        conn.pool = mock_pool
+
+        with pytest.raises(RuntimeError, match="Connection limit reached for role 'test_user'"):
+            await conn.execute_query('SELECT 1')
+
+    @pytest.mark.asyncio
     async def test_psycopg_pool_stats(self, mock_PsycopgPoolConnection):
         """Test that get_pool_stats returns accurate statistics."""
         stats = mock_PsycopgPoolConnection.get_pool_stats()

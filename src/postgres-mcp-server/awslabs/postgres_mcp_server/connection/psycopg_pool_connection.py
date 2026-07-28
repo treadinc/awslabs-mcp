@@ -54,7 +54,7 @@ class PsycopgPoolConnection(AbstractDBConnection):
         region: str,
         is_iam_auth: bool = False,
         pool_expiry_min: int = 30,
-        min_size: int = 1,
+        min_size: int = 0,
         max_size: int = 10,
         is_test: bool = False,
         connect_host: Optional[str] = None,
@@ -80,7 +80,13 @@ class PsycopgPoolConnection(AbstractDBConnection):
             connect_port: Port to actually open the TCP socket to. Defaults to port. Set this
                 (e.g. a local tunnel port) alongside connect_host.
             pool_expiry_min: Pool expiry time in minutes
-            min_size: Minimum number of connections in the pool
+            min_size: Minimum number of connections kept open at all times. Defaults to 0 so
+                a session that isn't actively querying holds no server-side connection — each
+                MCP client process gets its own pool for the life of the session, so a nonzero
+                min_size here multiplies by however many sessions are open concurrently and
+                stays claimed for hours, which is what exhausts a per-role CONNECTION LIMIT.
+                With min_size=0, psycopg_pool's own idle reaper closes an unused connection
+                after max_idle (default 10 min) instead of holding it indefinitely.
             max_size: Maximum number of connections in the pool
             is_test: Whether this is a test connection
         """
@@ -234,6 +240,20 @@ class PsycopgPoolConnection(AbstractDBConnection):
                             return {'columnMetadata': [], 'records': []}
 
         except Exception as e:
+            # Postgres reports this as a role-level FATAL, not a distinct exception type, so
+            # matching the message text is the only way to tell "role's CONNECTION LIMIT is
+            # exhausted" apart from a generic connection failure and give a fixable next step
+            # instead of a bare psycopg error the caller has no context to interpret.
+            if 'too many connections for role' in str(e):
+                logger.error(
+                    f'Connection limit reached for role {self.user!r} on {self.host}: {str(e)}'
+                )
+                raise RuntimeError(
+                    f"Connection limit reached for role '{self.user}' on {self.host}. "
+                    f'Other sessions connected to this cluster are likely holding the '
+                    f'remaining slots — each one is released automatically after ~10 minutes '
+                    f'idle, or close one of those sessions to free a slot immediately.'
+                ) from e
             logger.error(f'Database connection error: {str(e)}')
             raise e
 
