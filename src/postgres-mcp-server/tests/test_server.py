@@ -557,6 +557,29 @@ async def test_run_query_defaults_connection_args_from_startup():
 
 
 @pytest.mark.asyncio
+async def test_run_query_no_identity_and_no_startup_defaults_returns_error():
+    """Omitted args with no startup_connection_params to fall back on -> a clear error.
+
+    Also the type-narrowing guard that keeps pyright happy about passing possibly-None
+    values into DBConnectionMap.get(), which declares non-Optional str/ConnectionMethod
+    params.
+    """
+    prev = server_module.startup_connection_params
+    server_module.startup_connection_params = None
+    try:
+        ctx = DummyCtx()
+        tool_response = await run_query(sql='SELECT 1', ctx=ctx)
+
+        assert (
+            isinstance(tool_response, (list, tuple))
+            and len(tool_response) == 1
+            and 'error' in tool_response[0]
+        )
+    finally:
+        server_module.startup_connection_params = prev
+
+
+@pytest.mark.asyncio
 async def test_run_query_explicit_args_override_startup_defaults():
     """Explicitly-passed connection args win over startup_connection_params."""
     mock_db_connection = Mock_DBConnection(readonly=True)

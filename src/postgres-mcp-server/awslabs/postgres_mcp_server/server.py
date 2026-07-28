@@ -199,6 +199,14 @@ async def run_query(
     connection_method, cluster_identifier, db_endpoint, database = _fill_startup_conn_defaults(
         connection_method, cluster_identifier, db_endpoint, database
     )
+    if not (connection_method and cluster_identifier and db_endpoint and database):
+        err = (
+            'No connection_method/cluster_identifier/db_endpoint/database provided, and no '
+            'startup_connection_params to default from.'
+        )
+        logger.error(err)
+        await ctx.error(err)
+        return [{'error': err}]
 
     logger.info(
         f'Entered run_query with '
