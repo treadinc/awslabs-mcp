@@ -313,6 +313,13 @@ async def connect_to_database(
         Optional[str],
         Field(description='IAM auth username override (PG_WIRE_IAM_PROTOCOL only)'),
     ] = None,
+    connection_host: Annotated[
+        Optional[str],
+        Field(description='host to open the socket to (defaults to db_endpoint; set when tunneling)'),
+    ] = None,
+    connection_port: Annotated[
+        Optional[int], Field(description='port to open the socket to (defaults to port)')
+    ] = None,
 ) -> str:
     """Connect to a specific database save the connection internally.
 
@@ -326,6 +333,9 @@ async def connect_to_database(
         database: database name. Required parameter
         username: IAM auth username override (PG_WIRE_IAM_PROTOCOL only); takes
             priority over --secret_arn and MasterUsername resolution
+        connection_host: host to actually open the socket to; defaults to db_endpoint. Set
+            to e.g. 127.0.0.1 when reaching the DB through an SSH tunnel/proxy.
+        connection_port: port to actually open the socket to; defaults to port.
 
         Supported scenario:
         1. Aurora Postgres database with RDS_API + Credential Manager:
@@ -351,6 +361,8 @@ async def connect_to_database(
             port=port,
             database=database,
             username=username,
+            connection_host=connection_host,
+            connection_port=connection_port,
         )
 
         # Eagerly initialize the connection pool so it's ready for queries
@@ -632,6 +644,13 @@ def internal_create_connection(
         Optional[str],
         Field(description='IAM auth username override (PG_WIRE_IAM_PROTOCOL only)'),
     ] = None,
+    connection_host: Annotated[
+        Optional[str],
+        Field(description='host to open the socket to (defaults to db_endpoint; set when tunneling)'),
+    ] = None,
+    connection_port: Annotated[
+        Optional[int], Field(description='port to open the socket to (defaults to port)')
+    ] = None,
 ) -> Tuple:
     """Connect to a specific database save the connection internally.
 
@@ -668,11 +687,16 @@ def internal_create_connection(
         database_type: database type (APG or RPG)
         connection_method: connection method (RDS_API, PG_WIRE_PROTOCOL, or PG_WIRE_IAM_PROTOCOL)
         cluster_identifier: cluster identifier
-        db_endpoint: database endpoint
+        db_endpoint: database endpoint (used to sign the IAM token and validated against
+            the cluster's advertised endpoints; the identity of the connection)
         port: database port
         database: database name
         username: IAM auth username override (PG_WIRE_IAM_PROTOCOL only); takes
             priority over --secret_arn and MasterUsername resolution
+        connection_host: host to actually open the socket to; defaults to db_endpoint. Set
+            to e.g. 127.0.0.1 when reaching the DB through an SSH tunnel/proxy while the
+            IAM token and endpoint validation stay based on db_endpoint.
+        connection_port: port to actually open the socket to; defaults to port.
     """
     global db_connection_map
     global readonly_query
@@ -888,6 +912,8 @@ def internal_create_connection(
             db_user=iam_username,
             region=region,
             is_iam_auth=True,
+            connect_host=connection_host,
+            connect_port=connection_port,
         )
 
     elif connection_method == ConnectionMethod.RDS_API:
@@ -909,6 +935,8 @@ def internal_create_connection(
             db_user='',
             region=region,
             is_iam_auth=False,
+            connect_host=connection_host,
+            connect_port=connection_port,
         )
 
     if db_connection:
@@ -1130,6 +1158,27 @@ def main():
         ),
     )
     parser.add_argument(
+        '--connection_host',
+        required=False,
+        default=None,
+        help=(
+            'Host to actually open the TCP socket to (default: --db_endpoint). Set to e.g. '
+            '127.0.0.1 to reach the DB through an SSH tunnel/proxy; the IAM token and '
+            'endpoint validation stay based on --db_endpoint, so no /etc/hosts override is '
+            'needed.'
+        ),
+    )
+    parser.add_argument(
+        '--connection_port',
+        required=False,
+        default=None,
+        type=int,
+        help=(
+            'Port to actually open the TCP socket to (default: --port). Set to the local '
+            'tunnel port when using --connection_host.'
+        ),
+    )
+    parser.add_argument(
         '--secret_arn',
         required=False,
         action='append',
@@ -1201,6 +1250,8 @@ def main():
         f'database:{args.database}\n'
         f'port:{args.port}\n'
         f'username:{args.username}\n'
+        f'connection_host:{args.connection_host}\n'
+        f'connection_port:{args.connection_port}\n'
         f'secret_arn entries: {len(secret_arn_map)} per-target, '
         f'default={"set" if default_secret_arn else "unset"}\n'
     )
@@ -1242,6 +1293,8 @@ def main():
                 port=args.port,
                 database=args.database,
                 username=args.username,
+                connection_host=args.connection_host,
+                connection_port=args.connection_port,
             )
 
             # Test database connection

@@ -283,6 +283,49 @@ class TestInternalCreateConnection:
             server_module.configured_secret_arns.clear()
             server_module.configured_secret_arns.update(prev_map)
 
+    def test_connection_host_and_port_threaded_through_to_psycopg(self):
+        """connection_host/connection_port pass through to PsycopgPoolConnection's
+        connect_host/connect_port, decoupling the socket target from db_endpoint
+        (which stays the IAM-token / endpoint-validation identity).
+        """
+        with (
+            patch('awslabs.postgres_mcp_server.server.db_connection_map') as mock_map,
+            patch(
+                'awslabs.postgres_mcp_server.server.internal_get_cluster_properties'
+            ) as mock_props,
+            patch('awslabs.postgres_mcp_server.server.get_credentials_from_secret') as mock_creds,
+            patch('awslabs.postgres_mcp_server.server.PsycopgPoolConnection') as mock_pg_conn,
+        ):
+            mock_map.get.return_value = None
+            mock_props.return_value = {
+                'HttpEndpointEnabled': False,
+                'DBClusterArn': 'arn:aws:rds:us-east-1:123456789012:cluster:test',
+                'Endpoint': 'test.endpoint.com',
+                'Port': 5432,
+            }
+            mock_creds.return_value = ('iam_username', 'unused_password')
+            mock_pg_conn.return_value = MagicMock()
+
+            server_module.internal_create_connection(
+                region='us-east-1',
+                database_type=DatabaseType.APG,
+                connection_method=ConnectionMethod.PG_WIRE_IAM_PROTOCOL,
+                cluster_identifier='test-cluster',
+                db_endpoint='test.endpoint.com',
+                port=5432,
+                database='testdb',
+                connection_host='127.0.0.1',
+                connection_port=15433,
+            )
+
+            call_kwargs = mock_pg_conn.call_args[1]
+            # host/port (the IAM-token / endpoint-validation identity) are unchanged...
+            assert call_kwargs['host'] == 'test.endpoint.com'
+            assert call_kwargs['port'] == 5432
+            # ...while the socket target is passed through separately.
+            assert call_kwargs['connect_host'] == '127.0.0.1'
+            assert call_kwargs['connect_port'] == 15433
+
     def test_iam_connection_falls_back_to_master_username_when_no_secret(self):
         """IAM path falls back to MasterUsername when no Secrets Manager secret exists.
 
