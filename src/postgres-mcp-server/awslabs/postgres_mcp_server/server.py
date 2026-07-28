@@ -315,7 +315,9 @@ async def connect_to_database(
     ] = None,
     connection_host: Annotated[
         Optional[str],
-        Field(description='host to open the socket to (defaults to db_endpoint; set when tunneling)'),
+        Field(
+            description='host to open the socket to (defaults to db_endpoint; set when tunneling)'
+        ),
     ] = None,
     connection_port: Annotated[
         Optional[int], Field(description='port to open the socket to (defaults to port)')
@@ -646,7 +648,9 @@ def internal_create_connection(
     ] = None,
     connection_host: Annotated[
         Optional[str],
-        Field(description='host to open the socket to (defaults to db_endpoint; set when tunneling)'),
+        Field(
+            description='host to open the socket to (defaults to db_endpoint; set when tunneling)'
+        ),
     ] = None,
     connection_port: Annotated[
         Optional[int], Field(description='port to open the socket to (defaults to port)')

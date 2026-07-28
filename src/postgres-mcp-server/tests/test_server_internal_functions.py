@@ -284,9 +284,10 @@ class TestInternalCreateConnection:
             server_module.configured_secret_arns.update(prev_map)
 
     def test_connection_host_and_port_threaded_through_to_psycopg(self):
-        """connection_host/connection_port pass through to PsycopgPoolConnection's
-        connect_host/connect_port, decoupling the socket target from db_endpoint
-        (which stays the IAM-token / endpoint-validation identity).
+        """connection_host/connection_port pass through to PsycopgPoolConnection.
+
+        Decouples the socket target (connect_host/connect_port) from db_endpoint, which stays
+        the IAM-token / endpoint-validation identity.
         """
         with (
             patch('awslabs.postgres_mcp_server.server.db_connection_map') as mock_map,
