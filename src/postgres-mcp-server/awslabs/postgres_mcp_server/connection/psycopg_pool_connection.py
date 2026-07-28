@@ -127,12 +127,18 @@ class PsycopgPoolConnection(AbstractDBConnection):
         min_size: int = 1,
         max_size: int = 10,
         is_test: bool = False,
+        connect_host: Optional[str] = None,
+        connect_port: Optional[int] = None,
     ):
         """Initialize a new DB connection pool.
 
         Args:
-            host: Database host (Aurora cluster endpoint or RDS instance endpoint)
-            port: Database port
+            host: Database host (Aurora cluster endpoint or RDS instance endpoint). Used to
+                sign the IAM auth token (get_iam_auth_token) and as the connection-map
+                identity; must be the real endpoint even when the socket is opened
+                elsewhere (see connect_host).
+            port: Database port. Used for IAM token signing (the port RDS listens on); must
+                be the real DB port (typically 5432) even when connect_port differs.
             database: Database name
             readonly: Whether connections should be read-only
             secret_arn: ARN of the secret containing credentials
@@ -143,10 +149,19 @@ class PsycopgPoolConnection(AbstractDBConnection):
             min_size: Minimum number of connections in the pool
             max_size: Maximum number of connections in the pool
             is_test: Whether this is a test connection
+            connect_host: Host to actually open the TCP socket to. Defaults to host. Set
+                this (e.g. 127.0.0.1) when reaching the DB through an SSH tunnel/proxy
+                while the IAM token stays signed for the real endpoint (host).
+            connect_port: Port to actually open the TCP socket to. Defaults to port. Set
+                this (e.g. a local tunnel port) alongside connect_host.
         """
         super().__init__(readonly)
         self.host = host
         self.port = port
+        # Socket target. Defaults to the real endpoint; override to reach the DB through a
+        # tunnel/proxy. The IAM token (get_iam_auth_token) is still signed for host/port.
+        self.connect_host = connect_host or host
+        self.connect_port = connect_port or port
         self.database = database
         self.min_size = min_size
         self.max_size = max_size
@@ -183,6 +198,8 @@ class PsycopgPoolConnection(AbstractDBConnection):
                 f'initialize_pool:\n'
                 f'endpoint:{self.host}\n'
                 f'port:{self.port}\n'
+                f'connect_host:{self.connect_host}\n'
+                f'connect_port:{self.connect_port}\n'
                 f'region:{self.region}\n'
                 f'db:{self.database}\n'
                 f'user:{self.user}\n'
@@ -206,7 +223,7 @@ class PsycopgPoolConnection(AbstractDBConnection):
                 )
 
             self.created_time = datetime.now()
-            self.conninfo = f'host={self.host} port={self.port} dbname={self.database} user={self.user} password={password}'
+            self.conninfo = f'host={self.connect_host} port={self.connect_port} dbname={self.database} user={self.user} password={password}'
             self.pool = AsyncConnectionPool(
                 self.conninfo, min_size=self.min_size, max_size=self.max_size, open=False
             )
