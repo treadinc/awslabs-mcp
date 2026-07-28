@@ -193,6 +193,96 @@ class TestInternalCreateConnection:
             assert call_kwargs['db_user'] == 'iam_username'
             mock_creds.assert_called_once()
 
+    def test_username_override_takes_priority_over_secret(self):
+        """An explicit `username` argument wins over a configured --secret_arn.
+
+        setup_method configures a default --secret_arn for every test in this
+        class; passing `username` must still resolve to the override and must
+        not touch Secrets Manager at all.
+        """
+        with (
+            patch('awslabs.postgres_mcp_server.server.db_connection_map') as mock_map,
+            patch(
+                'awslabs.postgres_mcp_server.server.internal_get_cluster_properties'
+            ) as mock_props,
+            patch('awslabs.postgres_mcp_server.server.get_credentials_from_secret') as mock_creds,
+            patch('awslabs.postgres_mcp_server.server.PsycopgPoolConnection') as mock_pg_conn,
+        ):
+            mock_map.get.return_value = None
+            mock_props.return_value = {
+                'HttpEndpointEnabled': False,
+                'DBClusterArn': 'arn:aws:rds:us-east-1:123456789012:cluster:test',
+                'MasterUsername': 'postgres',
+                'Endpoint': 'test.endpoint.com',
+                'Port': 5432,
+            }
+            mock_pg_conn.return_value = MagicMock()
+
+            server_module.internal_create_connection(
+                region='us-east-1',
+                database_type=DatabaseType.APG,
+                connection_method=ConnectionMethod.PG_WIRE_IAM_PROTOCOL,
+                cluster_identifier='test-cluster',
+                db_endpoint='test.endpoint.com',
+                port=5432,
+                database='testdb',
+                username='jon@tread.io',
+            )
+
+            call_kwargs = mock_pg_conn.call_args[1]
+            assert call_kwargs['is_iam_auth'] is True
+            assert call_kwargs['db_user'] == 'jon@tread.io'
+            mock_creds.assert_not_called()
+
+    def test_username_override_needs_no_secret_or_master_username(self):
+        """`username` alone is sufficient; no --secret_arn or MasterUsername required."""
+        prev_default = server_module.configured_default_secret_arn
+        prev_map = dict(server_module.configured_secret_arns)
+        server_module.configured_default_secret_arn = None
+        server_module.configured_secret_arns.clear()
+        try:
+            with (
+                patch('awslabs.postgres_mcp_server.server.db_connection_map') as mock_map,
+                patch(
+                    'awslabs.postgres_mcp_server.server.internal_get_cluster_properties'
+                ) as mock_props,
+                patch(
+                    'awslabs.postgres_mcp_server.server.get_credentials_from_secret'
+                ) as mock_creds,
+                patch('awslabs.postgres_mcp_server.server.PsycopgPoolConnection') as mock_pg_conn,
+            ):
+                mock_map.get.return_value = None
+                # No MasterUsername, no MasterUserSecret — same as the
+                # Aurora-express, no-secret scenario in
+                # test_iam_connection_raises_when_no_username_anywhere, except
+                # here `username` makes the connection succeed anyway.
+                mock_props.return_value = {
+                    'HttpEndpointEnabled': False,
+                    'DBClusterArn': 'arn:aws:rds:us-east-1:123456789012:cluster:bare',
+                    'Endpoint': 'bare.endpoint.com',
+                    'Port': 5432,
+                }
+                mock_pg_conn.return_value = MagicMock()
+
+                server_module.internal_create_connection(
+                    region='us-east-1',
+                    database_type=DatabaseType.APG,
+                    connection_method=ConnectionMethod.PG_WIRE_IAM_PROTOCOL,
+                    cluster_identifier='bare-cluster',
+                    db_endpoint='bare.endpoint.com',
+                    port=5432,
+                    database='testdb',
+                    username='jon@tread.io',
+                )
+
+                call_kwargs = mock_pg_conn.call_args[1]
+                assert call_kwargs['db_user'] == 'jon@tread.io'
+                mock_creds.assert_not_called()
+        finally:
+            server_module.configured_default_secret_arn = prev_default
+            server_module.configured_secret_arns.clear()
+            server_module.configured_secret_arns.update(prev_map)
+
     def test_iam_connection_falls_back_to_master_username_when_no_secret(self):
         """IAM path falls back to MasterUsername when no Secrets Manager secret exists.
 

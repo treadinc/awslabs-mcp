@@ -309,6 +309,10 @@ async def connect_to_database(
     db_endpoint: Annotated[str, Field(description='database endpoint')],
     port: Annotated[int, Field(description='Postgres port')],
     database: Annotated[str, Field(description='database name')],
+    username: Annotated[
+        Optional[str],
+        Field(description='IAM auth username override (PG_WIRE_IAM_PROTOCOL only)'),
+    ] = None,
 ) -> str:
     """Connect to a specific database save the connection internally.
 
@@ -320,6 +324,8 @@ async def connect_to_database(
         db_endpoint: database endpoint
         port: database port
         database: database name. Required parameter
+        username: IAM auth username override (PG_WIRE_IAM_PROTOCOL only); takes
+            priority over --secret_arn and MasterUsername resolution
 
         Supported scenario:
         1. Aurora Postgres database with RDS_API + Credential Manager:
@@ -344,6 +350,7 @@ async def connect_to_database(
             db_endpoint=db_endpoint,
             port=port,
             database=database,
+            username=username,
         )
 
         # Eagerly initialize the connection pool so it's ready for queries
@@ -621,28 +628,40 @@ def internal_create_connection(
     db_endpoint: Annotated[str, Field(description='database endpoint')],
     port: Annotated[int, Field(description='Postgres port')],
     database: Annotated[str, Field(description='database name')] = 'postgres',
+    username: Annotated[
+        Optional[str],
+        Field(description='IAM auth username override (PG_WIRE_IAM_PROTOCOL only)'),
+    ] = None,
 ) -> Tuple:
     """Connect to a specific database save the connection internally.
 
-    Secrets Manager ARN resolution priority (each step falls through if
-    nothing matches):
+    IAM auth (PG_WIRE_IAM_PROTOCOL) username resolution priority (each step
+    falls through if nothing matches):
 
-      1. ``configured_secret_arns[cluster_identifier]`` if cluster path,
+      1. The operator-supplied ``username`` argument (``--username`` on the
+         CLI, or the ``connect_to_database`` tool param). Lets the operator
+         bind a per-human or per-role IAM identity with no Secrets Manager
+         secret at all — the token needs no password, so a secret would
+         only ever store the same plain string this argument already is.
+      2. ``configured_secret_arns[cluster_identifier]`` if cluster path,
          else ``configured_secret_arns[db_endpoint]`` for the RPG instance
          path. The instance lookup uses the AWS-resolved endpoint
          hostname, not the caller-supplied input — operator must register
          the hostname exactly as RDS reports it.
-      2. ``configured_default_secret_arn`` — the bare ``--secret_arn`` ARN
+      3. ``configured_default_secret_arn`` — the bare ``--secret_arn`` ARN
          with no key, intended as a default for any target the operator
          didn't pin explicitly.
-      3. Cluster's / instance's ``MasterUserSecret.SecretArn`` from RDS
+      4. Cluster's / instance's ``MasterUserSecret.SecretArn`` from RDS
          describe_* responses. This is the natural default for clusters
          whose master user is managed by Secrets Manager
          (ManageMasterUserPassword=True).
-      4. If none of the above yields a value, raise ``ValueError``.
+      5. Cluster's / instance's ``MasterUsername`` advertised by AWS. Only
+         reached when nothing above yields a username.
+      6. If none of the above yields a value, raise ``ValueError``.
 
-    Note: the LLM cannot influence steps 1–2. The map keys are facts
-    about the target derived from RDS metadata or operator configuration.
+    Note: the LLM cannot influence steps 1–3. ``username`` is operator/CLI
+    supplied, and the map keys in steps 2–3 are facts about the target
+    derived from RDS metadata or operator configuration.
 
     Args:
         region: region
@@ -652,6 +671,8 @@ def internal_create_connection(
         db_endpoint: database endpoint
         port: database port
         database: database name
+        username: IAM auth username override (PG_WIRE_IAM_PROTOCOL only); takes
+            priority over --secret_arn and MasterUsername resolution
     """
     global db_connection_map
     global readonly_query
@@ -831,13 +852,20 @@ def internal_create_connection(
     if connection_method == ConnectionMethod.PG_WIRE_IAM_PROTOCOL:
         # IAM auth uses a generated token as the password and only needs a
         # username. Resolution priority for the username:
-        #   1. The operator-configured secret (when --secret_arn is set,
+        #   1. The operator-supplied `username` argument. No secret needed —
+        #      the IAM token carries no password, so this lets the operator
+        #      bind a per-human or per-role identity (e.g. one Postgres role
+        #      per engineer) without a Secrets Manager secret's only content
+        #      being the same plain string this argument already is.
+        #   2. The operator-configured secret (when --secret_arn is set,
         #      we read 'username' from it). This lets the operator bind
         #      the MCP to a non-master role.
-        #   2. The cluster/instance MasterUsername advertised by AWS.
+        #   3. The cluster/instance MasterUsername advertised by AWS.
         #      This is the only path that works for Aurora express
         #      clusters, which never have a Secrets Manager secret.
-        if effective_secret_arn:
+        if username:
+            iam_username = username
+        elif effective_secret_arn:
             iam_username, _ = get_credentials_from_secret(
                 secret_arn=effective_secret_arn, region=region
             )
@@ -846,9 +874,9 @@ def internal_create_connection(
         else:
             raise ValueError(
                 'IAM authentication requires a username. Either supply '
-                '--secret_arn pointing at a secret with a "username" field, '
-                'or use a cluster/instance whose MasterUsername is reported '
-                'by AWS.'
+                '--username, or --secret_arn pointing at a secret with a '
+                '"username" field, or use a cluster/instance whose '
+                'MasterUsername is reported by AWS.'
             )
 
         db_connection = PsycopgPoolConnection(
@@ -1091,6 +1119,17 @@ def main():
     parser.add_argument('--database', help='Database name')
     parser.add_argument('--port', type=int, default=5432, help='Database port (default: 5432)')
     parser.add_argument(
+        '--username',
+        required=False,
+        default=None,
+        help=(
+            'IAM auth username override (PG_WIRE_IAM_PROTOCOL only). Takes priority '
+            'over --secret_arn and the cluster/instance MasterUsername. No Secrets '
+            'Manager secret needed — the IAM token carries no password, so this lets '
+            'the operator bind a per-human or per-role Postgres identity directly.'
+        ),
+    )
+    parser.add_argument(
         '--secret_arn',
         required=False,
         action='append',
@@ -1161,6 +1200,7 @@ def main():
         f'allow_write_query:{args.allow_write_query}\n'
         f'database:{args.database}\n'
         f'port:{args.port}\n'
+        f'username:{args.username}\n'
         f'secret_arn entries: {len(secret_arn_map)} per-target, '
         f'default={"set" if default_secret_arn else "unset"}\n'
     )
@@ -1201,6 +1241,7 @@ def main():
                 db_endpoint=args.db_endpoint,
                 port=args.port,
                 database=args.database,
+                username=args.username,
             )
 
             # Test database connection
