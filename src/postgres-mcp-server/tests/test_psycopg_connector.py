@@ -932,6 +932,68 @@ class TestPsycopgConnector:
             mock_pool_class.assert_called_once()
             assert 'password=iam_token_123' in conn.conninfo
 
+    def test_connect_host_and_port_default_to_host_and_port(self):
+        """connect_host/connect_port default to host/port when not supplied."""
+        conn = PsycopgPoolConnection(
+            host='reader.cluster-ro.rds.amazonaws.com',
+            port=5432,
+            database='test_db',
+            readonly=False,
+            secret_arn='',
+            db_user='iam_user',
+            is_iam_auth=True,
+            region='us-east-1',
+            is_test=True,
+        )
+
+        assert conn.connect_host == 'reader.cluster-ro.rds.amazonaws.com'
+        assert conn.connect_port == 5432
+
+    @pytest.mark.asyncio
+    async def test_conninfo_uses_connect_host_when_tunneling(self):
+        """The socket targets connect_host/connect_port while the IAM token stays
+        signed for the real host/port -- the whole point of the tunnel decouple.
+        """
+        with (
+            patch(
+                'awslabs.postgres_mcp_server.connection.psycopg_pool_connection.AsyncConnectionPool'
+            ) as mock_pool_class,
+            patch('boto3.client') as mock_boto_client,
+        ):
+            mock_pool = AsyncMock()
+            mock_pool_class.return_value = mock_pool
+            mock_rds_client = MagicMock()
+            mock_boto_client.return_value = mock_rds_client
+            mock_rds_client.generate_db_auth_token.return_value = 'iam_token_123'
+
+            conn = PsycopgPoolConnection(
+                host='reader.cluster-ro.rds.amazonaws.com',
+                port=5432,
+                database='test_db',
+                readonly=False,
+                secret_arn='',
+                db_user='iam_user',
+                is_iam_auth=True,
+                region='us-east-1',
+                is_test=True,
+                connect_host='127.0.0.1',
+                connect_port=15433,
+            )
+
+            await conn.initialize_pool()
+
+            # Socket target is the tunnel...
+            assert 'host=127.0.0.1' in conn.conninfo
+            assert 'port=15433' in conn.conninfo
+            assert 'host=reader.cluster-ro.rds.amazonaws.com' not in conn.conninfo
+            # ...but the IAM token is still signed for the real endpoint.
+            mock_rds_client.generate_db_auth_token.assert_called_once_with(
+                DBHostname='reader.cluster-ro.rds.amazonaws.com',
+                Port=5432,
+                DBUsername='iam_user',
+                Region='us-east-1',
+            )
+
     @pytest.mark.asyncio
     async def test_initialize_pool_already_initialized(self):
         """Test that initialize_pool doesn't reinitialize if pool exists."""
