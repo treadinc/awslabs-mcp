@@ -527,6 +527,98 @@ async def test_run_query_well_formatted_response():
 
 
 @pytest.mark.asyncio
+async def test_run_query_defaults_connection_args_from_startup():
+    """Omitted connection-identity args default from startup_connection_params."""
+    mock_db_connection = Mock_DBConnection(readonly=True)
+    mock_db_connection.data_client.add_mock_response({})
+    mock_db_connection.data_client.add_mock_response(get_mock_normal_query_response())
+    setup_mock_connection(mock_db_connection)
+
+    prev = server_module.startup_connection_params
+    server_module.startup_connection_params = {
+        'connection_method': ConnectionMethod.RDS_API,
+        'cluster_identifier': 'test-cluster',
+        'db_endpoint': 'test-endpoint',
+        'database': 'test-db',
+    }
+    try:
+        ctx = DummyCtx()
+        tool_response = await run_query(sql='SELECT * FROM example_table', ctx=ctx)
+
+        assert (
+            isinstance(tool_response, (list, tuple))
+            and len(tool_response) == 1
+            and isinstance(tool_response[0], dict)
+            and 'error' not in tool_response[0]
+        )
+        validate_normal_query_response(tool_response[0])
+    finally:
+        server_module.startup_connection_params = prev
+
+
+@pytest.mark.asyncio
+async def test_run_query_no_identity_and_no_startup_defaults_returns_error():
+    """Omitted args with no startup_connection_params to fall back on -> a clear error.
+
+    Also the type-narrowing guard that keeps pyright happy about passing possibly-None
+    values into DBConnectionMap.get(), which declares non-Optional str/ConnectionMethod
+    params.
+    """
+    prev = server_module.startup_connection_params
+    server_module.startup_connection_params = None
+    try:
+        ctx = DummyCtx()
+        tool_response = await run_query(sql='SELECT 1', ctx=ctx)
+
+        assert (
+            isinstance(tool_response, (list, tuple))
+            and len(tool_response) == 1
+            and 'error' in tool_response[0]
+        )
+    finally:
+        server_module.startup_connection_params = prev
+
+
+@pytest.mark.asyncio
+async def test_run_query_explicit_args_override_startup_defaults():
+    """Explicitly-passed connection args win over startup_connection_params."""
+    mock_db_connection = Mock_DBConnection(readonly=True)
+    mock_db_connection.data_client.add_mock_response({})
+    mock_db_connection.data_client.add_mock_response(get_mock_normal_query_response())
+    setup_mock_connection(mock_db_connection)
+
+    prev = server_module.startup_connection_params
+    # Startup params point somewhere with no registered connection -- if explicit args didn't
+    # win, this would fail with "No database connection available".
+    server_module.startup_connection_params = {
+        'connection_method': ConnectionMethod.RDS_API,
+        'cluster_identifier': 'other-cluster',
+        'db_endpoint': 'other-endpoint',
+        'database': 'other-db',
+    }
+    try:
+        ctx = DummyCtx()
+        tool_response = await run_query(
+            sql='SELECT * FROM example_table',
+            ctx=ctx,
+            connection_method=ConnectionMethod.RDS_API,
+            cluster_identifier='test-cluster',
+            db_endpoint='test-endpoint',
+            database='test-db',
+        )
+
+        assert (
+            isinstance(tool_response, (list, tuple))
+            and len(tool_response) == 1
+            and isinstance(tool_response[0], dict)
+            and 'error' not in tool_response[0]
+        )
+        validate_normal_query_response(tool_response[0])
+    finally:
+        server_module.startup_connection_params = prev
+
+
+@pytest.mark.asyncio
 async def test_run_query_safe_read_queries_on_redonly_settings():
     """Test that run_query accepts safe readonly queries when readonly setting is true."""
     mock_db_connection = Mock_DBConnection(readonly=True)
@@ -679,7 +771,12 @@ async def test_get_table_schema():
 
     ctx = DummyCtx()
     tool_response = await get_table_schema(
-        ConnectionMethod.RDS_API, 'test-cluster', 'test-endpoint', 'test-db', 'table_name', ctx
+        table_name='table_name',
+        ctx=ctx,
+        connection_method=ConnectionMethod.RDS_API,
+        cluster_identifier='test-cluster',
+        db_endpoint='test-endpoint',
+        database='test-db',
     )
 
     # validate tool_response
@@ -691,6 +788,35 @@ async def test_get_table_schema():
     )
     column_records = tool_response[0]
     validate_normal_query_response(column_records)
+
+
+@pytest.mark.asyncio
+async def test_get_table_schema_defaults_connection_args_from_startup():
+    """Omitted connection-identity args default from startup_connection_params."""
+    mock_db_connection = Mock_DBConnection(readonly=False)
+    mock_db_connection.data_client.add_mock_response(get_mock_normal_query_response())
+    setup_mock_connection(mock_db_connection)
+
+    prev = server_module.startup_connection_params
+    server_module.startup_connection_params = {
+        'connection_method': ConnectionMethod.RDS_API,
+        'cluster_identifier': 'test-cluster',
+        'db_endpoint': 'test-endpoint',
+        'database': 'test-db',
+    }
+    try:
+        ctx = DummyCtx()
+        tool_response = await get_table_schema(table_name='table_name', ctx=ctx)
+
+        assert (
+            isinstance(tool_response, (list, tuple))
+            and len(tool_response) == 1
+            and isinstance(tool_response[0], dict)
+            and 'error' not in tool_response[0]
+        )
+        validate_normal_query_response(tool_response[0])
+    finally:
+        server_module.startup_connection_params = prev
 
 
 def test_main_with_valid_parameters(monkeypatch, capsys):
