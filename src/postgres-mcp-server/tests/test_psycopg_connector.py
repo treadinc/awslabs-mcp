@@ -951,8 +951,10 @@ class TestPsycopgConnector:
 
     @pytest.mark.asyncio
     async def test_conninfo_uses_connect_host_when_tunneling(self):
-        """The socket targets connect_host/connect_port while the IAM token stays
-        signed for the real host/port -- the whole point of the tunnel decouple.
+        """The socket targets connect_host/connect_port.
+
+        The IAM token stays signed for the real host/port -- the whole point of the tunnel
+        decouple.
         """
         with (
             patch(
