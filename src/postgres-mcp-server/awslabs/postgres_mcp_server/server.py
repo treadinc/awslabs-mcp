@@ -166,10 +166,12 @@ async def run_query(
         Field(description='connection method (defaults to the server startup value)'),
     ] = None,
     cluster_identifier: Annotated[
-        Optional[str], Field(description='Cluster identifier (defaults to the server startup value)')
+        Optional[str],
+        Field(description='Cluster identifier (defaults to the server startup value)'),
     ] = None,
     db_endpoint: Annotated[
-        Optional[str], Field(description='database endpoint (defaults to the server startup value)')
+        Optional[str],
+        Field(description='database endpoint (defaults to the server startup value)'),
     ] = None,
     database: Annotated[
         Optional[str], Field(description='database name (defaults to the server startup value)')
@@ -288,10 +290,12 @@ async def get_table_schema(
         Field(description='connection method (defaults to the server startup value)'),
     ] = None,
     cluster_identifier: Annotated[
-        Optional[str], Field(description='Cluster identifier (defaults to the server startup value)')
+        Optional[str],
+        Field(description='Cluster identifier (defaults to the server startup value)'),
     ] = None,
     db_endpoint: Annotated[
-        Optional[str], Field(description='database endpoint (defaults to the server startup value)')
+        Optional[str],
+        Field(description='database endpoint (defaults to the server startup value)'),
     ] = None,
     database: Annotated[
         Optional[str], Field(description='database name (defaults to the server startup value)')
