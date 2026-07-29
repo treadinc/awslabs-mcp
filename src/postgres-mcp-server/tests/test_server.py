@@ -42,7 +42,7 @@ from awslabs.postgres_mcp_server.server import (
     write_query_prohibited_key,
 )
 from conftest import DummyCtx, Mock_DBConnection, Mock_PsycopgPoolConnection, MockException
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 SAFE_READONLY_QUERIES = [
@@ -1074,6 +1074,66 @@ def test_main_with_psycopg_parameters(monkeypatch, capsys):
 
     # This test of main() will now succeed in parsing parameters and creating a connection object
     main()
+
+
+def test_main_registers_connection_without_running_startup_query(monkeypatch):
+    """main() must not run a query against the connection it creates at startup.
+
+    Previously it validated the connection with run_query('SELECT 1') inside its own
+    asyncio.run() call. For PG_WIRE_IAM_PROTOCOL that bound the connection's aiorwlock to
+    that throwaway loop, and since mcp.run() always serves on a different one, the first
+    real query afterward crashed with "bound to a different event loop" (upstream issue
+    #2505 item #4). internal_create_connection still runs at startup (so a bad
+    --db_cluster_arn/--region still fails loudly) and still registers the connection for
+    run_query/get_table_schema to pick up once mcp.run() starts serving -- it just must
+    never be queried before then, so its rwlock is unbound and binds correctly on the
+    serving loop's first real use.
+    """
+    monkeypatch.setattr(
+        sys,
+        'argv',
+        [
+            'server.py',
+            '--connection_method',
+            'PG_WIRE_IAM_PROTOCOL',
+            '--db_type',
+            'APG',
+            '--db_cluster_arn',
+            'arn:aws:rds:us-west-2:123456789012:cluster:test-cluster',
+            '--db_endpoint',
+            'localhost',
+            '--port',
+            '5432',
+            '--database',
+            'postgres',
+            '--region',
+            'us-west-2',
+            '--username',
+            'jon@tread.io',
+        ],
+    )
+    mcp_run_mock = MagicMock()
+    monkeypatch.setattr('awslabs.postgres_mcp_server.server.mcp.run', mcp_run_mock)
+
+    create_calls = []
+
+    def fake_internal_create_connection(**kwargs):
+        create_calls.append(kwargs)
+        return MagicMock(), '{}'
+
+    monkeypatch.setattr(
+        'awslabs.postgres_mcp_server.server.internal_create_connection',
+        fake_internal_create_connection,
+    )
+    run_query_mock = AsyncMock()
+    monkeypatch.setattr('awslabs.postgres_mcp_server.server.run_query', run_query_mock)
+
+    main()
+
+    assert len(create_calls) == 1
+    assert create_calls[0]['cluster_identifier'] == 'test-cluster'
+    run_query_mock.assert_not_called()
+    mcp_run_mock.assert_called_once()
 
 
 def test_main_with_invalid_psycopg_parameters(monkeypatch, capsys):

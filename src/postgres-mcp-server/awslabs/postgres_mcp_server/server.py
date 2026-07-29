@@ -15,11 +15,9 @@
 """awslabs postgres MCP Server implementation."""
 
 import argparse
-import asyncio
 import json
 import sys
 import threading
-from awslabs.postgres_mcp_server.connection.abstract_db_connection import AbstractDBConnection
 from awslabs.postgres_mcp_server.connection.cp_api_connection import (
     DEFAULT_POSTGRES_PORT,
     internal_create_express_cluster,
@@ -88,19 +86,6 @@ configured_default_secret_arn: Optional[str] = None
 # Lets run_query/get_table_schema default connection_method/cluster_identifier/db_endpoint/
 # database from here when the caller omits them -- see _fill_startup_conn_defaults.
 startup_connection_params: Optional[Dict[str, Any]] = None
-
-
-class DummyCtx:
-    """A dummy context class for error handling in MCP tools."""
-
-    async def error(self, message):
-        """Raise a runtime error with the given message.
-
-        Args:
-            message: The error message to include in the runtime error
-        """
-        # Do nothing
-        pass
 
 
 def extract_cell(cell: dict):
@@ -1341,9 +1326,6 @@ def main():
 
     try:
         if args.db_type:
-            # Create the appropriate database connection based on the provided parameters
-            db_connection: Optional[AbstractDBConnection] = None
-
             cluster_identifier = args.db_cluster_arn.split(':')[-1]
 
             # Store startup parameters so run_query/get_table_schema can default their
@@ -1355,7 +1337,21 @@ def main():
                 'database': args.database,
             }
 
-            db_connection, llm_response = internal_create_connection(
+            # Registers the connection in db_connection_map for run_query/get_table_schema to
+            # use once mcp.run() starts serving below. Deliberately does not also run a query
+            # here to "test" it: doing so used to execute inside this function's own
+            # asyncio.run() call, which for PG_WIRE_IAM_PROTOCOL bound the connection's
+            # aiorwlock to that throwaway loop -- and since mcp.run() always serves on a
+            # different one, the first real query afterward crashed with "bound to a different
+            # event loop" (upstream issue #2505 item #4) instead of just working. Constructing
+            # the connection without querying it still validates the AWS-side configuration
+            # (the cluster/instance exists, the ARN resolves, credentials are resolvable):
+            # internal_create_connection raises on failure, so a bad --db_cluster_arn or
+            # --region still fails startup loudly. It just can't also prove Postgres itself
+            # will accept the connection before mcp.run() starts -- that now surfaces as an
+            # ordinary query error on the first real run_query/get_table_schema call instead
+            # of a startup crash.
+            internal_create_connection(
                 region=args.region,
                 database_type=DatabaseType[args.db_type],
                 connection_method=ConnectionMethod[args.connection_method],
@@ -1367,32 +1363,6 @@ def main():
                 connection_host=args.connection_host,
                 connection_port=args.connection_port,
             )
-
-            # Test database connection
-            if db_connection:
-                ctx = DummyCtx()
-                response = asyncio.run(
-                    run_query(
-                        'SELECT 1',
-                        ctx,
-                        ConnectionMethod[args.connection_method],
-                        cluster_identifier,
-                        args.db_endpoint,
-                        args.database,
-                    )
-                )
-                if (
-                    isinstance(response, list)
-                    and len(response) == 1
-                    and isinstance(response[0], dict)
-                    and 'error' in response[0]
-                ):
-                    logger.error(
-                        'Failed to validate database connection to Postgres. Exit the MCP server'
-                    )
-                    sys.exit(1)
-                else:
-                    logger.success('Successfully validated database connection to Postgres')
 
         logger.info('Postgres MCP server started')
         mcp.run()

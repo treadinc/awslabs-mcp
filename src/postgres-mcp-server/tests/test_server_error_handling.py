@@ -17,10 +17,10 @@ import json
 import pytest
 from awslabs.postgres_mcp_server.connection.db_connection_map import ConnectionMethod, DatabaseType
 from awslabs.postgres_mcp_server.server import (
-    DummyCtx,
     connect_to_database,
     run_query,
 )
+from conftest import DummyCtx
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
@@ -223,15 +223,3 @@ class TestConnectToDatabaseErrorHandling:
                 5432,
             )
             assert conn is None
-
-
-class TestDummyCtx:
-    """Tests for DummyCtx class."""
-
-    @pytest.mark.asyncio
-    async def test_dummy_ctx_error_does_nothing(self):
-        """Test that DummyCtx.error() completes without raising."""
-        ctx = DummyCtx()
-        # Should not raise any exception
-        await ctx.error('Test error message')
-        # If we get here, test passes
