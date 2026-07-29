@@ -1339,7 +1339,7 @@ def main():
             logger.error('Configured default --secret_arn is unreadable.')
             raise
 
-    try:
+    async def _run_server():
         if args.db_type:
             # Create the appropriate database connection based on the provided parameters
             db_connection: Optional[AbstractDBConnection] = None
@@ -1348,6 +1348,7 @@ def main():
 
             # Store startup parameters so run_query/get_table_schema can default their
             # connection-identity args when a caller omits them (_fill_startup_conn_defaults).
+            global startup_connection_params
             startup_connection_params = {
                 'connection_method': ConnectionMethod[args.connection_method],
                 'cluster_identifier': cluster_identifier,
@@ -1368,18 +1369,23 @@ def main():
                 connection_port=args.connection_port,
             )
 
-            # Test database connection
+            # Test database connection. Awaited in this same coroutine (and
+            # therefore the same event loop) as mcp.run_stdio_async() below, so
+            # the connection's aiorwlock binds once, here, and stays valid for
+            # every later query. Previously this ran inside its own asyncio.run()
+            # call, which bound the lock to a loop that no longer existed once
+            # mcp.run() started serving on a separate loop -- the first real
+            # query after a successful startup always crashed with "bound to a
+            # different event loop" (issue #2505 item #4).
             if db_connection:
                 ctx = DummyCtx()
-                response = asyncio.run(
-                    run_query(
-                        'SELECT 1',
-                        ctx,
-                        ConnectionMethod[args.connection_method],
-                        cluster_identifier,
-                        args.db_endpoint,
-                        args.database,
-                    )
+                response = await run_query(
+                    'SELECT 1',
+                    ctx,
+                    ConnectionMethod[args.connection_method],
+                    cluster_identifier,
+                    args.db_endpoint,
+                    args.database,
                 )
                 if (
                     isinstance(response, list)
@@ -1395,8 +1401,11 @@ def main():
                     logger.success('Successfully validated database connection to Postgres')
 
         logger.info('Postgres MCP server started')
-        mcp.run()
+        await mcp.run_stdio_async()
         logger.info('Postgres MCP server stopped')
+
+    try:
+        asyncio.run(_run_server())
     finally:
         db_connection_map.close_all()
 
