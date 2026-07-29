@@ -118,6 +118,19 @@ class DBConnectionMap:
                 entries.append(entry)
         return json.dumps(entries, indent=2)
 
+    def clear(self) -> None:
+        """Clear the map without closing connections.
+
+        Use this instead of ``close_all`` when the cached connections' own event loop
+        has already ended (e.g. the server startup self-test's ``asyncio.run()``):
+        their ``close()`` acquires the same lock their queries did, which is bound to
+        that now-dead loop, so driving ``close()`` from a new loop would just raise
+        "bound to a different event loop" instead of actually closing anything. The
+        discarded connections are garbage-collected instead.
+        """
+        with self._lock:
+            self.map.clear()
+
     def close_all(self) -> None:
         """Close all connections and clear the map.
 

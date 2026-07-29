@@ -24,6 +24,7 @@ import time
 import uuid
 from awslabs.postgres_mcp_server.connection.db_connection_map import (
     ConnectionMethod,
+    DatabaseType,
 )
 from awslabs.postgres_mcp_server.connection.psycopg_pool_connection import PsycopgPoolConnection
 from awslabs.postgres_mcp_server.server import (
@@ -42,7 +43,7 @@ from awslabs.postgres_mcp_server.server import (
     write_query_prohibited_key,
 )
 from conftest import DummyCtx, Mock_DBConnection, Mock_PsycopgPoolConnection, MockException
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 SAFE_READONLY_QUERIES = [
@@ -619,6 +620,68 @@ async def test_run_query_explicit_args_override_startup_defaults():
 
 
 @pytest.mark.asyncio
+async def test_run_query_auto_connects_on_cache_miss_matching_startup(monkeypatch):
+    """A cache miss for the server's own pinned identity auto-connects instead of erroring.
+
+    This is what fixes issue #2505 item #4: aiorwlock.RWLock binds to whichever event loop
+    first acquires it, so the connection created during the startup self-test (its own
+    throwaway asyncio.run() loop) can't be reused once mcp.run() starts serving on a
+    different loop. main() discards it via db_connection_map.clear(), so the first real
+    run_query call for the server's own identity always sees a cache miss here -- it must
+    rebuild fresh on the current (correct) loop instead of erroring.
+    """
+    db_connection_map.remove(ConnectionMethod.RDS_API, 'auto-cluster', 'auto-endpoint', 'auto-db')
+
+    prev = server_module.startup_connection_params
+    server_module.startup_connection_params = {
+        'connection_method': ConnectionMethod.RDS_API,
+        'cluster_identifier': 'auto-cluster',
+        'db_endpoint': 'auto-endpoint',
+        'database': 'auto-db',
+        'region': 'us-west-2',
+        'database_type': DatabaseType.APG,
+        'port': 5432,
+        'username': None,
+        'connection_host': None,
+        'connection_port': None,
+    }
+
+    mock_db_connection = Mock_DBConnection(readonly=True)
+    mock_db_connection.data_client.add_mock_response({})
+    mock_db_connection.data_client.add_mock_response(get_mock_normal_query_response())
+
+    create_calls = []
+
+    def fake_internal_create_connection(**kwargs):
+        create_calls.append(kwargs)
+        return mock_db_connection, '{}'
+
+    monkeypatch.setattr(
+        server_module, 'internal_create_connection', fake_internal_create_connection
+    )
+
+    try:
+        ctx = DummyCtx()
+        tool_response = await run_query(sql='SELECT * FROM example_table', ctx=ctx)
+
+        assert len(create_calls) == 1
+        assert create_calls[0]['cluster_identifier'] == 'auto-cluster'
+        assert create_calls[0]['database_type'] == DatabaseType.APG
+        assert (
+            isinstance(tool_response, (list, tuple))
+            and len(tool_response) == 1
+            and isinstance(tool_response[0], dict)
+            and 'error' not in tool_response[0]
+        )
+        validate_normal_query_response(tool_response[0])
+    finally:
+        server_module.startup_connection_params = prev
+        db_connection_map.remove(
+            ConnectionMethod.RDS_API, 'auto-cluster', 'auto-endpoint', 'auto-db'
+        )
+
+
+@pytest.mark.asyncio
 async def test_run_query_safe_read_queries_on_redonly_settings():
     """Test that run_query accepts safe readonly queries when readonly setting is true."""
     mock_db_connection = Mock_DBConnection(readonly=True)
@@ -1074,6 +1137,63 @@ def test_main_with_psycopg_parameters(monkeypatch, capsys):
 
     # This test of main() will now succeed in parsing parameters and creating a connection object
     main()
+
+
+def test_main_discards_startup_connection_via_clear_not_close_all(monkeypatch):
+    """main() must discard the startup-validation connection via clear(), not close_all().
+
+    The self-test runs inside its own throwaway asyncio.run() loop; close_all() would try
+    to await each connection's close(), which acquires the same aiorwlock already bound to
+    that now-dead loop, raising "bound to a different event loop" instead of actually
+    closing anything (see DBConnectionMap.clear()'s docstring). close_all() should still
+    run exactly once, from the pre-existing `finally:` shutdown cleanup -- never for this
+    mid-startup discard.
+    """
+    monkeypatch.setattr(
+        sys,
+        'argv',
+        [
+            'server.py',
+            '--connection_method',
+            'PG_WIRE_PROTOCOL',
+            '--db_type',
+            'APG',
+            '--db_cluster_arn',
+            'arn:aws:rds:us-west-2:123456789012:cluster:test-cluster',
+            '--db_endpoint',
+            'localhost',
+            '--port',
+            '5432',
+            '--database',
+            'postgres',
+            '--region',
+            'us-west-2',
+            '--secret_arn',  # pragma: allowlist secret
+            'arn:aws:secretsmanager:us-west-2:123456789012:secret:test-secret',
+        ],
+    )
+    monkeypatch.setattr('awslabs.postgres_mcp_server.server.mcp.run', lambda: None)
+    monkeypatch.setattr(
+        'awslabs.postgres_mcp_server.server.get_credentials_from_secret',
+        lambda secret_arn, region, is_test=False: ('test_user', 'test_password'),
+    )
+    monkeypatch.setattr(
+        'awslabs.postgres_mcp_server.server.internal_create_connection',
+        lambda **kwargs: (MagicMock(), '{}'),
+    )
+    monkeypatch.setattr(
+        'awslabs.postgres_mcp_server.server.run_query',
+        AsyncMock(return_value=[{'columnMetadata': [], 'records': []}]),
+    )
+    clear_mock = MagicMock()
+    monkeypatch.setattr(server_module.db_connection_map, 'clear', clear_mock)
+    close_all_mock = MagicMock()
+    monkeypatch.setattr(server_module.db_connection_map, 'close_all', close_all_mock)
+
+    main()
+
+    clear_mock.assert_called_once()
+    close_all_mock.assert_called_once()
 
 
 def test_main_with_invalid_psycopg_parameters(monkeypatch, capsys):

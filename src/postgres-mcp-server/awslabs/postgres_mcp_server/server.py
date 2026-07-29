@@ -224,6 +224,37 @@ async def run_query(
         database=database,
     )
     if not db_connection:
+        # No cached connection -- either this is the first real query after the startup
+        # self-test's connection was discarded (see main(), issue #2505 item #4), or the
+        # caller is targeting the server's own pinned cluster with nothing else registered.
+        # Rebuild it here, on the current (correct) serving loop, using the same identity
+        # and credentials the server started with.
+        scp = startup_connection_params or {}
+        if (
+            connection_method == scp.get('connection_method')
+            and cluster_identifier == scp.get('cluster_identifier')
+            and db_endpoint == scp.get('db_endpoint')
+            and database == scp.get('database')
+        ):
+            logger.info('No cached connection; auto-connecting using startup parameters')
+            try:
+                db_connection, _ = internal_create_connection(
+                    region=scp['region'],
+                    database_type=scp['database_type'],
+                    connection_method=connection_method,
+                    cluster_identifier=cluster_identifier,
+                    db_endpoint=db_endpoint,
+                    port=scp['port'],
+                    database=database,
+                    username=scp.get('username'),
+                    connection_host=scp.get('connection_host'),
+                    connection_port=scp.get('connection_port'),
+                )
+            except Exception as e:
+                logger.error(f'Auto-connect using startup parameters failed: {e}')
+                db_connection = None
+
+    if not db_connection:
         err = (
             f'No database connection available for method:{connection_method}, '
             f'cluster_identifier:{cluster_identifier}, db_endpoint:{db_endpoint}, database:{database}'
@@ -1347,12 +1378,21 @@ def main():
             cluster_identifier = args.db_cluster_arn.split(':')[-1]
 
             # Store startup parameters so run_query/get_table_schema can default their
-            # connection-identity args when a caller omits them (_fill_startup_conn_defaults).
+            # connection-identity args when a caller omits them (_fill_startup_conn_defaults),
+            # and can reconnect on the serving loop after the startup self-test's connection
+            # is discarded below (_fill_startup_conn_defaults only reads the first four keys;
+            # the rest are only for that reconnect).
             startup_connection_params = {
                 'connection_method': ConnectionMethod[args.connection_method],
                 'cluster_identifier': cluster_identifier,
                 'db_endpoint': args.db_endpoint,
                 'database': args.database,
+                'region': args.region,
+                'database_type': DatabaseType[args.db_type],
+                'port': args.port,
+                'username': args.username,
+                'connection_host': args.connection_host,
+                'connection_port': args.connection_port,
             }
 
             db_connection, llm_response = internal_create_connection(
@@ -1393,6 +1433,17 @@ def main():
                     sys.exit(1)
                 else:
                     logger.success('Successfully validated database connection to Postgres')
+
+            # The self-test above ran inside its own throwaway asyncio.run() loop.
+            # aiorwlock.RWLock (the connection's read/write lock) binds lazily to whichever
+            # event loop first acquires it and raises if a later acquire happens under a
+            # different one -- and mcp.run() below serves on a different loop, so reusing
+            # this connection would crash the first real run_query/get_table_schema call
+            # with "bound to a different event loop" (issue #2505 item #4). Discard it via
+            # clear() rather than close_all() -- see DBConnectionMap.clear()'s docstring for
+            # why close() can't actually run here either. run_query's auto-connect (below)
+            # rebuilds a fresh connection, unbound, on the serving loop's first real use.
+            db_connection_map.clear()
 
         logger.info('Postgres MCP server started')
         mcp.run()
